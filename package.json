@@ -1,0 +1,15 @@
+{
+  "name": "mbox-reader",
+  "version": "1.0.0",
+  "description": "Electron JS tool to read .mbox files and view email messages within them",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "^31.4.0",
+    "typescript": "^5.5.4"
+  }
+}
