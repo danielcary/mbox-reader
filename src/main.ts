@@ -1,9 +1,12 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, ipcMain } from 'electron';
 
 const createWindow = () => {
     const win = new BrowserWindow({
         width: 800,
-        height: 600
+        height: 600,
+        webPreferences: {
+            preload: 'preload.js',
+        }
     });
 
     win.loadFile('index.html');
@@ -11,6 +14,13 @@ const createWindow = () => {
 
 
 app.whenReady().then(() => {
+    // handle messages from renderer process
+    ipcMain.on('set-title', (e, title) => {
+        const webContents = e.sender;
+        const win = BrowserWindow.fromWebContents(webContents);
+        win?.setTitle('and Bob\'s your uncle');
+    });
+
     createWindow();
 
     app.on('window-all-closed', () => {
