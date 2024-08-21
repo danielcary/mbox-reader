@@ -4,6 +4,8 @@
   "description": "Electron JS tool to read .mbox files and view email messages within them",
   "main": "index.js",
   "scripts": {
+    "build": "npx tsc -p ./src && npx webpack --mode development",
+    "start": "npx electron ./out/main.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",

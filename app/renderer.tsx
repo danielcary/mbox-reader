@@ -10,7 +10,7 @@ class App extends React.Component<any, any> {
     constructor(props: any) {
         super(props);
 
-
+        myapi.setTitle("s");
     }
 
     render() {
