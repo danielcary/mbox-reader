@@ -2,6 +2,10 @@ import * as React from 'react';
 import { createRoot } from 'react-dom/client';
 import 'bootstrap/dist/css/bootstrap.min.css';
 
+import { myapi as APITYPE } from '../src/preload'
+
+declare const myapi : APITYPE;
+
 // theorotically, we should be to set the titile window.electronAPI.setTitle()
 
 
@@ -9,7 +13,7 @@ class App extends React.Component<any, any> {
 
     constructor(props: any) {
         super(props);
-
+        
         myapi.setTitle("s");
     }
 
