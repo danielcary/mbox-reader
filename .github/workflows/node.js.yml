@@ -3,6 +3,17 @@
 
 name: Node.js CI
 
+# Required for Pages deploy
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment at a time
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+  
 on:
   push:
     branches: [ "main" ]
