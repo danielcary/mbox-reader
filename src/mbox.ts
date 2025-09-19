@@ -21,112 +21,160 @@ export interface ParsedEmail {
 
 const FROM_SEP = /^From ([^\s]+)\s+(.*)$/; // "From " + envelope sender + space + date
 
+type handleEmail = (email: ParsedEmail) => Promise<void> | void;
+
 // ---------- Public entry points ----------
-export async function readMboxFile(file: File): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    const r = new FileReader();
-    r.onerror = () => reject(r.error);
-    r.onload = () => resolve(String(r.result ?? ""));
-    // mbox is text; UTF-8 works for Gmail exports
-    r.readAsText(file);
-  });
+export async function readMboxFile(file: File, cb: handleEmail) {
+  if (!file || !cb) {
+    throw new Error('Bad arguments');
+  }
+
+  // A File is a Blob, and Blob has .stream()
+  const reader = file.stream().pipeThrough(new TextDecoderStream()).getReader();
+  let buf = '';
+  let loop = true;
+  let idx = 0;
+  try {
+    while (loop) {
+      const { value, done } = await reader.read();
+      if (value) buf += value;
+
+      // Drain all complete messages currently in buf
+      while (true) {
+        const { email, rest } = parseFirstMboxMessage(buf);
+        if (!email) break;           // need more data
+        email.index = idx++;
+        await cb(email);
+        buf = rest;               // drop consumed part
+      }
+
+      if (done) loop = false;
+    }
+
+  } finally {
+    reader.releaseLock();
+  }
 }
 
-export function looksLikeMbox(text: string): boolean {
-  // Quick heuristic: file starts with a valid "From " separator line
-  // and contains at least one blank line after it (headers/body start).
+
+export async function looksLikeMbox(file: File, sampleBytes = 2048): Promise<boolean> {
+  // Read only the first chunk (avoid loading huge files fully)
+  const blob = file.slice(0, sampleBytes);
+  const text = await blob.text();
+
   const firstLine = text.split(/\r?\n/, 1)[0] ?? "";
   if (!firstLine.startsWith("From ")) return false;
   return FROM_SEP.test(firstLine);
 }
 
-export function parseMbox(text: string): ParsedEmail[] {
-  // Normalize line endings to LF (RFC4155 uses LF)
+// Parse at most the first *complete* message and return the remainder.
+function parseFirstMboxMessage(
+  text: string
+): { email: ParsedEmail | null; rest: string; consumed: number } {
+  // Normalize line endings to LF
   const data = text.replace(/\r\n/g, "\n");
 
-  // Find all indices of real separator lines (start-of-line "From " per RFC4155)
-  // NOTE: body lines that read "From " should be escaped as ">From " (mboxrd),
-  // so plain "^From " is safe to treat as separators.
-  const lines = data.split("\n");
-  const separators: number[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].startsWith("From ") && FROM_SEP.test(lines[i])) {
-      separators.push(i);
-    }
-  }
-  if (separators.length === 0) return [];
-
-  const messages: ParsedEmail[] = [];
-  for (let s = 0; s < separators.length; s++) {
-    const start = separators[s];
-    const end = s + 1 < separators.length ? separators[s + 1] - 1 : lines.length - 1;
-
-    const sepLine = lines[start];
-
-    // message content is after separator until just before next separator
-    const chunkLines = lines.slice(start + 1, end + 1);
-    const chunk = chunkLines.join("\n");
-
-    // split headers/body at first blank line
-    const headerBodySplit = splitHeaderBody(chunk);
-
-    const headersRaw = headerBodySplit.headersRaw;
-    const headers = parseHeaders(headersRaw); // unfolded + decoded, lowercased keys
-    const bodyRaw = headerBodySplit.bodyRaw;
-
-    // Unescape mboxrd ">From " lines in body: remove exactly one leading ">" when followed by "From "
-    const body = unescapeMboxrdFromLines(bodyRaw);
-
-    const [, envFrom, envDateRaw] = sepLine.match(FROM_SEP) ?? ["", "", ""];
-    const envelopeDate = parseCtimeLikeDate(envDateRaw); // best-effort
-
-    const msg: ParsedEmail = {
-      index: messages.length,
-      separatorRaw: sepLine,
-      envelopeFrom: envFrom || undefined,
-      envelopeDateRaw: envDateRaw || undefined,
-      envelopeDate,
-
-      headersRaw,
-      headers,
-      subject: headers["subject"],
-      from: headers["from"],
-      to: headers["to"],
-      cc: headers["cc"],
-      bcc: headers["bcc"],
-      date: parseDateHeader(headers["date"]),
-
-      body,
-      raw: chunk
-    };
-
-    messages.push(msg);
+  // Find the first real separator at a line start
+  const firstSepIdx = findSepAtOrAfterSOL(data, 0);
+  if (firstSepIdx < 0) {
+    // No separator at all yet; keep everything for later
+    return { email: null, rest: data, consumed: 0 };
   }
 
-  return messages;
+  // If buffer has junk before the first separator, drop it (mbox readers typically do)
+  const buf = firstSepIdx === 0 ? data : data.slice(firstSepIdx);
+
+  // Where does the first separator line end?
+  const sepLineEnd = buf.indexOf("\n", 0);
+  if (sepLineEnd < 0) {
+    // We don't even have the full separator line yet
+    return { email: null, rest: buf, consumed: 0 };
+  }
+
+  // Find the next separator line start (beginning of the *next* message)
+  const nextSepIdx = findSepAtOrAfterSOL(buf, sepLineEnd + 1);
+
+  if (nextSepIdx < 0) {
+    // No next separator yet -> the first message is incomplete in the stream
+    return { email: null, rest: buf, consumed: 0 };
+  }
+
+  // We have a complete message from [0 .. nextSepIdx)
+  const sepLine = buf.slice(0, sepLineEnd).replace(/\n$/, "");
+  const chunk = buf.slice(sepLineEnd + 1, nextSepIdx); // between separators
+
+  // Split headers/body
+  const { headersRaw, bodyRaw } = splitHeaderBody(chunk);
+  const headers = parseHeaders(headersRaw);
+  const body = unescapeMboxrdFromLines(bodyRaw);
+
+  const m = sepLine.match(FROM_SEP);
+  const envFrom = m?.[1] ?? "";
+  const envDateRaw = m?.[2] ?? "";
+
+  const email: ParsedEmail = {
+    index: 0,
+    separatorRaw: sepLine,
+    envelopeFrom: envFrom || undefined,
+    envelopeDateRaw: envDateRaw || undefined,
+    envelopeDate: parseCtimeLikeDate(envDateRaw),
+
+    headersRaw,
+    headers,
+    subject: headers["subject"],
+    from: headers["from"],
+    to: headers["to"],
+    cc: headers["cc"],
+    bcc: headers["bcc"],
+    date: parseDateHeader(headers["date"]),
+
+    body,
+    raw: chunk
+  };
+
+  // Remainder starts at nextSepIdx (i.e., begins with "From ")
+  const rest = buf.slice(nextSepIdx);
+  const consumed = buf.length - rest.length + (firstSepIdx === 0 ? 0 : firstSepIdx);
+
+  return { email, rest, consumed };
+}
+
+/**
+ * Find a "From " separator that starts at the beginning of a line (SOL),
+ * at or after `start`. Returns the absolute index, or -1 if none.
+ */
+function findSepAtOrAfterSOL(s: string, start: number): number {
+  // Use a regex that asserts start-of-string or newline before "From "
+  const re = /(^|\n)From [^\n]*/g;
+  re.lastIndex = start > 0 ? start - 1 : 0; // allow matching with the (^|\n) group
+  const m = re.exec(s);
+  if (!m) return -1;
+  // Adjust to the "F" of "From "
+  const matchStart = m.index + (m[1] ? m[1].length : 0);
+  // Validate the line against FROM_SEP to avoid ">From " and false positives
+  const lineEnd = s.indexOf("\n", matchStart);
+  const sepLine = s.slice(matchStart, lineEnd < 0 ? s.length : lineEnd);
+  return FROM_SEP.test(sepLine) ? matchStart : findSepAtOrAfterSOL(s, (lineEnd < 0 ? s.length : lineEnd) + 1);
 }
 
 // ---------- Helpers: header/body split ----------
 function splitHeaderBody(raw: string): { headersRaw: string; bodyRaw: string } {
-  // RFC 5322 headers end at the first empty line
   const idx = raw.indexOf("\n\n");
   if (idx === -1) {
-    // no blank line -> treat all as headers; empty body
     return { headersRaw: raw.trimEnd(), bodyRaw: "" };
   }
   return {
     headersRaw: raw.slice(0, idx).replace(/\n+$/, ""),
-    bodyRaw: raw.slice(idx + 2) // after the blank line
+    bodyRaw: raw.slice(idx + 2)
   };
 }
 
 // ---------- Helpers: headers ----------
 function parseHeaders(headersRaw: string): Record<string, string> {
-  // Unfold: continuation lines begin with space or tab
   const lines = headersRaw.split("\n");
   const unfolded: string[] = [];
   for (const line of lines) {
-    if (line.match(/^[ \t]/) && unfolded.length) {
+    if (/^[ \t]/.test(line) && unfolded.length) {
       unfolded[unfolded.length - 1] += line.replace(/^\s+/, " ");
     } else {
       unfolded.push(line);
@@ -139,7 +187,6 @@ function parseHeaders(headersRaw: string): Record<string, string> {
     if (sep === -1) continue;
     const name = line.slice(0, sep).trim().toLowerCase();
     const value = line.slice(sep + 1).trim();
-    // Decode RFC 2047 "encoded-words" if present
     result[name] = decodeEncodedWords(value);
   }
   return result;
@@ -156,31 +203,31 @@ function decodeEncodedWords(input: string): string {
       let bytes: Uint8Array;
 
       if (encoding === "B") {
-        // Base64
         const bin = atob(text.replace(/\s+/g, ""));
         bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       } else {
-        // "Q" (Quoted-Printable-like for headers): "_" means space
-        const qp = text.replace(/_/g, " ").replace(/=([0-9A-Fa-f]{2})/g, (_m: any, h: string) =>
-          String.fromCharCode(parseInt(h, 16))
-        );
+        const qp = text
+          .replace(/_/g, " ")
+          .replace(/=([0-9A-Fa-f]{2})/g, (_m: any, h: string) => String.fromCharCode(parseInt(h, 16)));
         const arr = Array.from(qp, (ch: any) => ch.charCodeAt(0));
         bytes = new Uint8Array(arr);
       }
 
-      // Try to decode using TextDecoder with provided charset (fallback to utf-8)
       const dec = tryTextDecoder(cs);
       return dec.decode(bytes);
     } catch {
-      return input; // fallback: leave as-is
+      return input;
     }
   });
 }
 
 function tryTextDecoder(charset: string): TextDecoder {
-  // Most Gmail exports are UTF-8; browser TextDecoder supports many common charsets.
-  try { return new TextDecoder(charset); } catch { return new TextDecoder("utf-8"); }
+  try {
+    return new TextDecoder(charset);
+  } catch {
+    return new TextDecoder("utf-8");
+  }
 }
 
 // ---------- Helpers: dates ----------
@@ -192,16 +239,24 @@ function parseDateHeader(v?: string): Date | null {
 
 function parseCtimeLikeDate(v?: string): Date | null {
   if (!v) return null;
-  // mbox separator uses ctime()-like format WITHOUT TZ, intended as UTC per RFC4155.
-  // Appending " UTC" makes most browsers parse it reasonably.
-  // Example: "Mon Jan  2 15:04:05 2006"
   const d = new Date(v + " UTC");
   return isNaN(d.getTime()) ? null : d;
 }
 
 // ---------- Helpers: mboxrd unescape ----------
 function unescapeMboxrdFromLines(body: string): string {
-  // Remove exactly one leading ">" when followed by "From "
-  // Do this at line starts only.
   return body.replace(/(^|\n)>(From .*)/g, (_m, pfx, rest) => (pfx ? pfx : "") + rest);
+}
+
+// Turn LF to CRLF per RFC for .eml files
+function toCRLF(s: string) {
+  return s.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n");
+}
+
+// From your ParsedEmail, reconstruct an .eml blob.
+// Prefer the *original* wire content if you have it.
+// If you kept `raw = headers+body` (without the "From " line), use that:
+export function buildEml(email: ParsedEmail): string {
+  const raw = email.headersRaw + "\n\n" + email.body; // your `body` is already unescaped mboxrd
+  return toCRLF(raw);
 }

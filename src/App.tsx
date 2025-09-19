@@ -3,11 +3,18 @@ import reactLogo from './assets/react.svg'
 import viteLogo from '/vite.svg'
 import './App.css'
 
-import { looksLikeMbox, parseMbox, readMboxFile } from './mbox';
+import * as mbox from './mbox';
+import JSZip from 'jszip';
 
 interface IAppState {
 
 }
+
+
+type emailFile = {
+  email: string,
+  name: string,
+};
 
 class App extends Component<any, IAppState> {
 
@@ -19,33 +26,84 @@ class App extends Component<any, IAppState> {
 
   async process() {
     const f = document.getElementById('mboxFile')! as HTMLInputElement;
-    const out = document.getElementById('out')! as HTMLElement;
     console.log(f.files)
 
-    const text = await readMboxFile(f.files![0]);
+    // if (await mbox.looksLikeMbox(f.files![0]) == false) {
+    //   out.textContent = "This file does not look like an mbox!!!";
+    //   console.error("This file does not look like an mbox!!!");
+    //   return;
+    // }
 
-    if (!looksLikeMbox(text)) {
-      out.textContent = 'This file does not look like an mbox (missing "From " separator at start).';
-      return;
+    let emails: emailFile[] = [];
+    let emailsSize = 0;
+    await mbox.readMboxFile(f.files![0], async (m) => {
+      const email = mbox.buildEml(m);
+      emails.push({ email: email, name: this.safeFilename(m.subject, m.index) });
+      emailsSize += new TextEncoder().encode(email).byteLength;
+      if (emailsSize > 200 * 1024 ** 2) {
+        const batch = emails;
+        emails = [];
+        emailsSize = 0;
+
+        await this.genZip(batch);
+      }
+    });
+
+    if (emails.length > 0) {
+      await this.genZip(emails);
     }
 
-    const msgs = parseMbox(text);
-    out.textContent =
-      `Parsed ${msgs.length} messages.\n\n` +
-      // Show a quick summary of the first few messages:
-      msgs.slice(0, 5).map(m =>
-        [
-          `#${m.index}`,
-          `Subject: ${m.subject ?? '(no subject)'}`,
-          `From: ${m.from ?? m.envelopeFrom ?? '(unknown)'}`,
-          `To: ${m.to ?? '(unknown)'}`,
-          `Date: ${m.date?.toISOString?.() ?? m.envelopeDate?.toISOString?.() ?? '(unknown)'}`,
-          `--- body preview ---`,
-          (m.body || '').slice(0, 300).replace(/\n/g, '\\n'),
-          `---------------------`
-        ].join('\n')
-      ).join('\n\n');
+  }
 
+  /**
+ * Turn an email subject (or any string) into a safe filename.
+ * 
+ * - Replaces illegal characters \/:*?"<>| with "_"
+ * - Trims trailing dots and spaces (Windows forbids these)
+ * - Ensures length <= 120 characters (adjustable)
+ * - Falls back to "message" if string is empty
+ */
+  private safeFilename(subject: string | undefined, index: number, maxLen = 120): string {
+    const fallback = "message";
+    const base = (subject ?? fallback).trim() || fallback;
+
+    // Replace disallowed characters
+    let name = base.replace(/[\\\/:*?"<>|]/g, "_");
+
+    // Trim trailing spaces/dots
+    name = name.replace(/[ .]+$/, "");
+
+    // Enforce length limit (reserve space for index + extension)
+    const reserve = 10; // e.g. "_1234.eml"
+    if (name.length > maxLen - reserve) {
+      name = name.slice(0, maxLen - reserve);
+    }
+
+    return `${name}_${index}.eml`;
+  }
+
+
+  private async genZip(emails: emailFile[]) {
+    const zip = new JSZip();
+    emails.forEach((email) => {
+      zip.file(email.name, email.email);
+    });
+
+    const zipBlob = await zip.generateAsync({
+      type: "blob",
+      compression: "DEFLATE",
+      compressionOptions: { level: 4 }
+    });
+
+    // Trigger download
+    const url = URL.createObjectURL(zipBlob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = 'mbox.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   render() {
