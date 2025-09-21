@@ -140,23 +140,22 @@ class App extends Component<any, IAppState> {
         }
         <br />
         <Card>
-          <Card.Body>
-            <input type="file" id="mboxFile" accept=".mbox"
-              onChange={(e) => {
-                const input = e.target as HTMLInputElement;
-                this.setState({ fileLoaded: (input.files != null && input.files.length > 0) },
-                  () => { if (this.state.fileLoaded) this.setState({ processing: false }) });
-              }} />
-            <Button
-              onClick={() => this.process()}
-              disabled={!this.state.fileLoaded || this.state.processing == 'done'}>
-              {this.state.processing === true &&
-                <Spinner animation="border" as="span" size="sm" role="status" aria-hidden="true" />}
-              {this.state.processing == 'done' ? 'Processed!'
-                : this.state.processing === true ? 'Processing'
-                  : 'Process'}
-            </Button>
-          </Card.Body>
+          <input type="file" id="mboxFile" accept=".mbox"
+            onChange={(e) => {
+              const input = e.target as HTMLInputElement;
+              this.setState({ fileLoaded: (input.files != null && input.files.length > 0) },
+                () => { if (this.state.fileLoaded) this.setState({ processing: false }) });
+            }} />
+          <br />
+          <Button
+            onClick={() => this.process()}
+            disabled={!this.state.fileLoaded || this.state.processing == 'done'}>
+            {this.state.processing === true &&
+              <Spinner animation="border" as="span" size="sm" role="status" aria-hidden="true" />}
+            {this.state.processing == 'done' ? 'Processed!'
+              : this.state.processing === true ? 'Processing'
+                : 'Process'}
+          </Button>
         </Card>
       </Col></Row>
     </Container>
