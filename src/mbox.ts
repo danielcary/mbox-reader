@@ -56,12 +56,11 @@ export async function readMboxFile(file: File, cb: handleEmail) {
   }
 }
 
-
 export async function looksLikeMbox(file: File, sampleBytes = 2048): Promise<boolean> {
   // Read only the first chunk (avoid loading huge files fully)
   const blob = file.slice(0, sampleBytes);
   const text = await blob.text();
-
+  
   const firstLine = text.split(/\r?\n/, 1)[0] ?? "";
   if (!firstLine.startsWith("From ")) return false;
   return FROM_SEP.test(firstLine);
